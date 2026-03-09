@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buffer-Drain-Replay: Zero-Loss Dynamic Repartitioning</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<style>
+  :root {
+    --accent: #00b4d8; --warn: #f77f00; --good: #06d6a0;
+    --bad: #ef476f; --bg-card: rgba(255,255,255,0.05);
+  }
+  .reveal { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  .reveal h1, .reveal h2, .reveal h3 { color: var(--accent); text-transform: none; font-weight: 700; }
+  .reveal h1 { font-size: 2.2em; } .reveal h2 { font-size: 1.6em; }
+  .reveal h3 { font-size: 1.2em; color: #ccc; }
+  .reveal section { text-align: left; }
+  .reveal .center { text-align: center; }
+  .reveal .subtitle { color: #999; font-size: 0.7em; margin-top: -0.5em; }
+  .reveal ul { list-style: none; padding-left: 0; }
+  .reveal ul li { padding: 0.25em 0; padding-left: 1.5em; position: relative; font-size: 0.82em; }
+  .reveal ul li::before { content: ""; position: absolute; left: 0; top: 0.6em;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  .reveal .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2em; margin-top: 0.8em; }
+  .reveal .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.8em; margin-top: 0.8em; }
+  .reveal .card { background: var(--bg-card); border-radius: 10px; padding: 1em; border: 1px solid rgba(255,255,255,0.08); }
+  .reveal .card h3 { margin: 0 0 0.4em 0; font-size: 0.95em; }
+  .reveal .card p, .reveal .card li { font-size: 0.72em; }
+  .reveal .tag { display: inline-block; padding: 0.1em 0.5em; border-radius: 20px; font-size: 0.58em; font-weight: 600; margin: 0.1em; }
+  .reveal .tag-good { background: rgba(6,214,160,0.2); color: var(--good); border: 1px solid var(--good); }
+  .reveal .tag-bad { background: rgba(239,71,111,0.2); color: var(--bad); border: 1px solid var(--bad); }
+  .reveal .tag-warn { background: rgba(247,127,0,0.2); color: var(--warn); border: 1px solid var(--warn); }
+  .reveal .tag-info { background: rgba(0,180,216,0.2); color: var(--accent); border: 1px solid var(--accent); }
+  .diagram { background: rgba(0,0,0,0.3); border-radius: 10px; padding: 1.2em;
+    font-family: 'Courier New', monospace; font-size: 0.62em; line-height: 1.6;
+    border: 1px solid rgba(255,255,255,0.1); margin: 0.6em 0; text-align: center; }
+  .diagram .accent { color: var(--accent); font-weight: bold; }
+  .diagram .good { color: var(--good); font-weight: bold; }
+  .diagram .warn { color: var(--warn); font-weight: bold; }
+  .diagram .bad { color: var(--bad); font-weight: bold; }
+  .diagram .dim { color: #666; }
+  .chat { margin: 0.45em 0; display: flex; gap: 0.6em; align-items: flex-start; }
+  .chat-avatar { width: 36px; height: 36px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; font-weight: 800; font-size: 0.6em; flex-shrink: 0; color: #000; }
+  .chat-bubble { background: var(--bg-card); border-radius: 0 10px 10px 10px;
+    padding: 0.5em 0.8em; max-width: 88%; border: 1px solid rgba(255,255,255,0.08); }
+  .chat-bubble p { margin: 0; font-size: 0.7em; line-height: 1.4; }
+  .chat-bubble .name { font-weight: 700; font-size: 0.6em; margin-bottom: 0.2em; }
+  .chat-bubble .name.dev { color: var(--accent); }
+  .chat-bubble .name.ops { color: var(--warn); }
+  .chat-bubble .name.biz { color: var(--good); }
+  .chat-right { flex-direction: row-reverse; }
+  .chat-right .chat-bubble { border-radius: 10px 0 10px 10px; }
+  .quote-block { background: rgba(239,71,111,0.06); border-left: 4px solid var(--bad);
+    padding: 0.8em 1.2em; border-radius: 0 10px 10px 0; margin: 0.5em 0; }
+  .quote-block p { font-size: 0.72em; font-style: italic; margin: 0.2em 0; color: #ddd; }
+  .quote-block .source { font-size: 0.55em; font-style: normal; color: #888; margin-top: 0.3em; }
+  .step-num { display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: 50%; background: var(--accent);
+    color: #000; font-weight: 800; font-size: 0.85em; margin-right: 0.4em; flex-shrink: 0; }
+  .step-row { display: flex; align-items: flex-start; margin: 0.4em 0; }
+  .step-row .step-text { font-size: 0.72em; padding-top: 0.2em; }
+  .step-row .step-text strong { color: var(--accent); }
+  .reveal table { font-size: 0.62em; border-collapse: collapse; width: 100%; margin-top: 0.6em; }
+  .reveal table th { background: rgba(0,180,216,0.15); color: var(--accent);
+    padding: 0.5em 0.6em; text-align: left; border-bottom: 2px solid var(--accent); }
+  .reveal table td { padding: 0.4em 0.6em; border-bottom: 1px solid rgba(255,255,255,0.08); }
+  .callout { background: rgba(0,180,216,0.08); border-left: 4px solid var(--accent);
+    padding: 0.6em 1em; border-radius: 0 8px 8px 0; margin: 0.6em 0; font-size: 0.75em; }
+  .callout.warn { background: rgba(247,127,0,0.08); border-left-color: var(--warn); }
+  .callout.good { background: rgba(6,214,160,0.08); border-left-color: var(--good); }
+  .callout.bad { background: rgba(239,71,111,0.08); border-left-color: var(--bad); }
+  .big-number { font-size: 3em; font-weight: 800; color: var(--accent); line-height: 1; }
+  .reveal .small { font-size: 0.6em; color: #888; }
+  .reveal .fragment.fade-in-then-semi-out.visible:not(.current-fragment) { opacity: 0.4; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ======================== TITLE ======================== -->
+<section class="center">
+  <h1>Buffer-Drain-Replay</h1>
+  <h3>Zero-Loss Dynamic Repartitioning</h3>
+  <p class="small" style="color:#666;">Scale message partitions at runtime &mdash; up or down &mdash; without losing a single message</p>
+</section>
+
+<!-- ======================== THE PROBLEM ======================== -->
+<section>
+  <h2>The Problem: Static Partitions</h2>
+  <div class="chat fragment">
+    <div class="chat-avatar" style="background:var(--warn);">OPS</div>
+    <div class="chat-bubble">
+      <div class="name ops">Ops &mdash; #incident</div>
+      <p>Order processing backed up. Consumer lag at 50K. We need more consumers NOW.</p>
+    </div>
+  </div>
+  <div class="chat chat-right fragment">
+    <div class="chat-avatar" style="background:var(--accent);">DEV</div>
+    <div class="chat-bubble">
+      <div class="name dev">Backend Lead</div>
+      <p>Can't. Partition count is fixed at 3. To change it we need a new topic + migration. Last time that was 2 hours downtime and we lost messages.</p>
+    </div>
+  </div>
+  <div class="chat fragment">
+    <div class="chat-avatar" style="background:var(--good);">BIZ</div>
+    <div class="chat-bubble">
+      <div class="name biz">Finance &mdash; next quarter</div>
+      <p>We're paying $18K/month for 20 idle consumers. Traffic dropped 80%. Can we scale down?</p>
+    </div>
+  </div>
+  <div class="chat chat-right fragment">
+    <div class="chat-avatar" style="background:var(--accent);">DEV</div>
+    <div class="chat-bubble">
+      <div class="name dev">Backend Lead</div>
+      <p>No. Partition count can never decrease. The docs literally say: <em>"not currently supported."</em> &mdash; since 2015.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================== COST ======================== -->
+<section>
+  <h2>The Hidden Tax of Static Partitions</h2>
+  <div class="grid3">
+    <div class="card" style="text-align:center;">
+      <h3 style="color:var(--bad);">$$$</h3>
+      <p>Over-provisioned compute &mdash; paying for peak 24/7 because you can't scale down</p>
+    </div>
+    <div class="card" style="text-align:center;">
+      <h3 style="color:var(--warn);">Hours</h3>
+      <p>Planned downtime for topic migration. Weeks of planning for a config change.</p>
+    </div>
+    <div class="card" style="text-align:center;">
+      <h3 style="color:var(--bad);">Risk</h3>
+      <p>Manual migration is error-prone. Messages lost during switchover.</p>
+    </div>
+  </div>
+  <br>
+  <div class="callout bad" style="text-align:center;">
+    Today, <strong>partition count is a permanent architectural decision</strong> made at creation time.<br>Set too low = bottleneck. Set too high = waste. Can never undo.
+  </div>
+  <div class="callout good" style="text-align:center; margin-top:0.4em;">
+    <strong>What if partition count was just another runtime configuration?</strong>
+  </div>
+</section>
+
+<!-- ======================== ARCHITECTURE (early) ======================== -->
+<section>
+  <h2>Architecture Overview</h2>
+  <svg viewBox="0 0 1100 520" style="width:100%; max-height:68vh; margin:0 auto; display:block;" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ah" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#00b4d8"/></marker>
+      <marker id="ah-g" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#06d6a0"/></marker>
+      <marker id="ah-w" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#f77f00"/></marker>
+      <filter id="glow"><feGaussianBlur stdDeviation="3" result="g"/><feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <linearGradient id="grad-producer" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f77f00" stop-opacity="0.15"/><stop offset="100%" stop-color="#f77f00" stop-opacity="0.03"/></linearGradient>
+      <linearGradient id="grad-broker" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#00b4d8" stop-opacity="0.12"/><stop offset="100%" stop-color="#00b4d8" stop-opacity="0.03"/></linearGradient>
+      <linearGradient id="grad-consumer" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#06d6a0" stop-opacity="0.15"/><stop offset="100%" stop-color="#06d6a0" stop-opacity="0.03"/></linearGradient>
+      <linearGradient id="grad-cp" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#b388ff" stop-opacity="0.15"/><stop offset="100%" stop-color="#b388ff" stop-opacity="0.03"/></linearGradient>
+      <linearGradient id="grad-rt" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#06d6a0" stop-opacity="0.12"/><stop offset="100%" stop-color="#06d6a0" stop-opacity="0.03"/></linearGradient>
+    </defs>
+
+    <!-- ===== PRODUCERS ===== -->
+    <rect x="20" y="30" width="220" height="220" rx="14" fill="url(#grad-producer)" stroke="#f77f00" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="130" y="60" text-anchor="middle" fill="#f77f00" font-size="16" font-weight="700">PRODUCERS</text>
+    <text x="130" y="82" text-anchor="middle" fill="#999" font-size="11">(any language)</text>
+    <!-- producer icons -->
+    <rect x="42" y="100" width="56" height="34" rx="6" fill="rgba(247,127,0,0.08)" stroke="#f77f00" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="70" y="121" text-anchor="middle" fill="#f77f00" font-size="10" font-weight="600">Go</text>
+    <rect x="110" y="100" width="56" height="34" rx="6" fill="rgba(247,127,0,0.08)" stroke="#f77f00" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="138" y="121" text-anchor="middle" fill="#f77f00" font-size="10" font-weight="600">Python</text>
+    <rect x="76" y="142" width="56" height="34" rx="6" fill="rgba(247,127,0,0.08)" stroke="#f77f00" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="104" y="163" text-anchor="middle" fill="#f77f00" font-size="10" font-weight="600">Java</text>
+    <!-- KV watch label -->
+    <rect x="42" y="192" width="166" height="42" rx="8" fill="rgba(0,180,216,0.08)" stroke="#00b4d8" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="125" y="210" text-anchor="middle" fill="#00b4d8" font-size="10" font-weight="600">KV Watch</text>
+    <text x="125" y="224" text-anchor="middle" fill="#888" font-size="9">mode | partition_count</text>
+
+    <!-- ===== STREAMING BROKER ===== -->
+    <rect x="320" y="15" width="340" height="250" rx="14" fill="url(#grad-broker)" stroke="#00b4d8" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="490" y="42" text-anchor="middle" fill="#00b4d8" font-size="16" font-weight="700">STREAMING BROKER</text>
+    <!-- Partition streams -->
+    <rect x="342" y="60" width="140" height="62" rx="8" fill="rgba(0,180,216,0.06)" stroke="#00b4d8" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="412" y="79" text-anchor="middle" fill="#00b4d8" font-size="11" font-weight="600">Partition Streams</text>
+    <text x="412" y="95" text-anchor="middle" fill="#777" font-size="9">ORDERS.0  ORDERS.1</text>
+    <text x="412" y="109" text-anchor="middle" fill="#777" font-size="9">ORDERS.2  ORDERS.N</text>
+    <!-- Buffer stream -->
+    <rect x="500" y="60" width="140" height="62" rx="8" fill="rgba(247,127,0,0.06)" stroke="#f77f00" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="570" y="79" text-anchor="middle" fill="#f77f00" font-size="11" font-weight="600">Buffer Stream</text>
+    <text x="570" y="97" text-anchor="middle" fill="#777" font-size="9">Temp storage during</text>
+    <text x="570" y="111" text-anchor="middle" fill="#777" font-size="9">repartition</text>
+    <!-- KV Store -->
+    <rect x="342" y="136" width="190" height="52" rx="8" fill="rgba(0,180,216,0.1)" stroke="#00b4d8" stroke-width="1.5" stroke-opacity="0.5" filter="url(#glow)"/>
+    <text x="437" y="157" text-anchor="middle" fill="#00b4d8" font-size="12" font-weight="700">KV Store</text>
+    <text x="437" y="175" text-anchor="middle" fill="#888" font-size="9">mode | partition_count | repartition_state</text>
+    <!-- DLQ -->
+    <rect x="550" y="136" width="90" height="52" rx="8" fill="rgba(239,71,111,0.06)" stroke="#ef476f" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="595" y="157" text-anchor="middle" fill="#ef476f" font-size="11" font-weight="600">DLQ</text>
+    <text x="595" y="173" text-anchor="middle" fill="#777" font-size="9">Dead letters</text>
+    <!-- Consumers label -->
+    <rect x="342" y="202" width="298" height="48" rx="8" fill="rgba(6,214,160,0.04)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.2"/>
+    <text x="491" y="222" text-anchor="middle" fill="#06d6a0" font-size="10" font-weight="600">Durable Pull Consumers (filter per partition)</text>
+    <text x="491" y="238" text-anchor="middle" fill="#777" font-size="9">partition-0  partition-1  partition-2  ...  partition-N</text>
+
+    <!-- ===== CONSUMERS ===== -->
+    <rect x="740" y="30" width="200" height="220" rx="14" fill="url(#grad-consumer)" stroke="#06d6a0" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="840" y="60" text-anchor="middle" fill="#06d6a0" font-size="16" font-weight="700">CONSUMERS</text>
+    <text x="840" y="80" text-anchor="middle" fill="#999" font-size="11">one per partition</text>
+    <!-- consumer boxes -->
+    <rect x="762" y="96" width="68" height="30" rx="6" fill="rgba(6,214,160,0.08)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="796" y="115" text-anchor="middle" fill="#06d6a0" font-size="10">C-0</text>
+    <rect x="840" y="96" width="68" height="30" rx="6" fill="rgba(6,214,160,0.08)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="874" y="115" text-anchor="middle" fill="#06d6a0" font-size="10">C-1</text>
+    <rect x="762" y="134" width="68" height="30" rx="6" fill="rgba(6,214,160,0.08)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="796" y="153" text-anchor="middle" fill="#06d6a0" font-size="10">C-2</text>
+    <rect x="840" y="134" width="68" height="30" rx="6" fill="rgba(6,214,160,0.15)" stroke="#06d6a0" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="874" y="153" text-anchor="middle" fill="#06d6a0" font-size="10">C-N</text>
+    <!-- process + ack -->
+    <text x="840" y="188" text-anchor="middle" fill="#999" font-size="10">Process &amp; Ack</text>
+    <text x="840" y="204" text-anchor="middle" fill="#999" font-size="10">per-key ordering</text>
+    <text x="840" y="220" text-anchor="middle" fill="#999" font-size="10">guaranteed</text>
+
+    <!-- ===== CONTROL PLANE ===== -->
+    <rect x="320" y="300" width="260" height="200" rx="14" fill="url(#grad-cp)" stroke="#b388ff" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="450" y="328" text-anchor="middle" fill="#b388ff" font-size="16" font-weight="700">CONTROL PLANE</text>
+    <text x="450" y="346" text-anchor="middle" fill="#999" font-size="10">(leader-elected)</text>
+    <!-- sub-components -->
+    <rect x="338" y="360" width="110" height="28" rx="6" fill="rgba(179,136,255,0.08)" stroke="#b388ff" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="393" y="378" text-anchor="middle" fill="#b388ff" font-size="10">Leader Election</text>
+    <rect x="458" y="360" width="105" height="28" rx="6" fill="rgba(179,136,255,0.08)" stroke="#b388ff" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="510" y="378" text-anchor="middle" fill="#b388ff" font-size="10">Reconciler</text>
+    <rect x="338" y="396" width="110" height="28" rx="6" fill="rgba(179,136,255,0.12)" stroke="#b388ff" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="393" y="414" text-anchor="middle" fill="#b388ff" font-size="10" font-weight="600">Scaler (7-step)</text>
+    <rect x="458" y="396" width="105" height="28" rx="6" fill="rgba(179,136,255,0.08)" stroke="#b388ff" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="510" y="414" text-anchor="middle" fill="#b388ff" font-size="10">Auto-Scaler</text>
+    <rect x="338" y="432" width="225" height="28" rx="6" fill="rgba(179,136,255,0.05)" stroke="#b388ff" stroke-width="1" stroke-opacity="0.2"/>
+    <text x="450" y="450" text-anchor="middle" fill="#999" font-size="10">API  /scale  /register  /status  +  Dashboard</text>
+    <text x="450" y="486" text-anchor="middle" fill="#666" font-size="9">Crash-resumable checkpoint to KV</text>
+
+    <!-- ===== RUNTIME BACKEND ===== -->
+    <rect x="660" y="340" width="200" height="120" rx="14" fill="url(#grad-rt)" stroke="#06d6a0" stroke-width="1.5" stroke-opacity="0.5"/>
+    <text x="760" y="368" text-anchor="middle" fill="#06d6a0" font-size="14" font-weight="700">RUNTIME BACKEND</text>
+    <!-- backend icons -->
+    <rect x="678" y="382" width="76" height="28" rx="6" fill="rgba(6,214,160,0.08)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="716" y="400" text-anchor="middle" fill="#06d6a0" font-size="10">Docker</text>
+    <rect x="764" y="382" width="76" height="28" rx="6" fill="rgba(6,214,160,0.08)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="802" y="400" text-anchor="middle" fill="#06d6a0" font-size="10">Kubernetes</text>
+    <rect x="678" y="418" width="76" height="28" rx="6" fill="rgba(6,214,160,0.05)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.2" stroke-dasharray="4,3"/>
+    <text x="716" y="436" text-anchor="middle" fill="#888" font-size="10">ECS</text>
+    <rect x="764" y="418" width="76" height="28" rx="6" fill="rgba(6,214,160,0.05)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.2" stroke-dasharray="4,3"/>
+    <text x="802" y="436" text-anchor="middle" fill="#888" font-size="10">Nomad</text>
+
+    <!-- ===== ARROWS ===== -->
+    <!-- Producers → Broker -->
+    <line x1="240" y1="120" x2="318" y2="90" stroke="#f77f00" stroke-width="2" marker-end="url(#ah-w)"/>
+    <text x="270" y="96" fill="#f77f00" font-size="9" font-weight="600">publish</text>
+    <!-- Broker → Consumers -->
+    <line x1="660" y1="90" x2="738" y2="120" stroke="#06d6a0" stroke-width="2" marker-end="url(#ah-g)"/>
+    <text x="690" y="96" fill="#06d6a0" font-size="9" font-weight="600">deliver</text>
+    <!-- KV ← watch ← Producers (dashed) -->
+    <line x1="342" y1="162" x2="208" y2="212" stroke="#00b4d8" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#ah)"/>
+    <text x="260" y="196" fill="#00b4d8" font-size="9">watch</text>
+    <!-- Control Plane → Broker (KV) -->
+    <line x1="450" y1="300" x2="450" y2="268" stroke="#b388ff" stroke-width="2" marker-end="url(#ah)"/>
+    <text x="464" y="288" fill="#b388ff" font-size="9">read/write KV</text>
+    <!-- Control Plane → Runtime -->
+    <line x1="580" y1="410" x2="658" y2="400" stroke="#06d6a0" stroke-width="2" marker-end="url(#ah-g)"/>
+    <text x="608" y="396" fill="#06d6a0" font-size="9">scale</text>
+    <!-- Runtime → Consumers (dashed) -->
+    <line x1="760" y1="340" x2="840" y2="254" stroke="#06d6a0" stroke-width="1.5" stroke-dasharray="6,4" marker-end="url(#ah-g)"/>
+    <text x="812" y="300" fill="#06d6a0" font-size="9" transform="rotate(-50,812,300)">start/stop</text>
+  </svg>
+</section>
+
+<!-- ======================== LANDSCAPE ======================== -->
+<section>
+  <h2>How Current Systems Compare</h2>
+  <table>
+    <thead>
+      <tr><th>System</th><th>Scale Up</th><th>Scale Down</th><th>Zero Loss</th><th>No Downtime</th><th>Approach</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Kafka</td><td><span class="tag tag-warn">Add only</span></td><td><span class="tag tag-bad">Never</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-warn">Risky</span></td><td>New partitions start empty; old data stays</td></tr>
+      <tr><td>Kinesis</td><td><span class="tag tag-warn">2x split</span></td><td><span class="tag tag-warn">Merge</span></td><td><span class="tag tag-warn">Manual</span></td><td><span class="tag tag-warn">Complex</span></td><td>Shard lineage; consumers track parents</td></tr>
+      <tr><td>Pravega</td><td><span class="tag tag-good">Yes</span></td><td><span class="tag tag-good">Yes</span></td><td><span class="tag tag-good">Yes</span></td><td><span class="tag tag-good">Yes</span></td><td>Sealed segments; requires Pravega SDK</td></tr>
+      <tr><td>Pulsar</td><td><span class="tag tag-warn">Add only</span></td><td><span class="tag tag-bad">Never</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-warn">Risky</span></td><td>Same limitations as Kafka</td></tr>
+      <tr style="background:rgba(0,180,216,0.05);"><td><strong>This Pattern</strong></td><td><span class="tag tag-good">Any N</span></td><td><span class="tag tag-good">Any M</span></td><td><span class="tag tag-good">Yes</span></td><td><span class="tag tag-good">Seconds</span></td><td>Buffer-Drain-Replay + KV signaling</td></tr>
+    </tbody>
+  </table>
+  <div class="callout" style="margin-top:0.8em;">Most systems treat partition count as <strong>immutable infrastructure</strong>. This pattern treats it as <strong>runtime configuration</strong>.</div>
+</section>
+
+<!-- ======================== THE PROTOCOL ======================== -->
+<section>
+  <section class="center">
+    <h1>The Protocol</h1>
+    <h3>7 checkpointed steps, fully resumable</h3>
+  </section>
+
+  <section>
+    <h2>The 7-Step Protocol</h2>
+    <svg viewBox="0 0 1100 560" style="width:100%; max-height:72vh; margin:0 auto; display:block;" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="s-ah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#00b4d8"/></marker>
+        <marker id="s-ah-w" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#f77f00"/></marker>
+        <marker id="s-ah-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#06d6a0"/></marker>
+        <linearGradient id="sg-buf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f77f00" stop-opacity="0.18"/><stop offset="100%" stop-color="#f77f00" stop-opacity="0.04"/></linearGradient>
+        <linearGradient id="sg-reconf" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#00b4d8" stop-opacity="0.18"/><stop offset="100%" stop-color="#00b4d8" stop-opacity="0.04"/></linearGradient>
+        <linearGradient id="sg-restore" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#06d6a0" stop-opacity="0.18"/><stop offset="100%" stop-color="#06d6a0" stop-opacity="0.04"/></linearGradient>
+        <filter id="s-glow"><feGaussianBlur stdDeviation="2.5" result="g"/><feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+
+      <!-- ===== PHASE BACKGROUNDS ===== -->
+      <rect x="14" y="68" width="320" height="480" rx="16" fill="url(#sg-buf)" stroke="#f77f00" stroke-width="1" stroke-opacity="0.3"/>
+      <text x="174" y="94" text-anchor="middle" fill="#f77f00" font-size="13" font-weight="700" letter-spacing="1">BUFFER PHASE</text>
+      <rect x="354" y="68" width="300" height="480" rx="16" fill="url(#sg-reconf)" stroke="#00b4d8" stroke-width="1" stroke-opacity="0.3"/>
+      <text x="504" y="94" text-anchor="middle" fill="#00b4d8" font-size="13" font-weight="700" letter-spacing="1">RECONFIGURE</text>
+      <rect x="674" y="68" width="320" height="480" rx="16" fill="url(#sg-restore)" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.3"/>
+      <text x="834" y="94" text-anchor="middle" fill="#06d6a0" font-size="13" font-weight="700" letter-spacing="1">RESTORE &amp; REPLAY</text>
+
+      <!-- ===== ACTOR LANES (top) ===== -->
+      <text x="70" y="35" text-anchor="middle" fill="#f77f00" font-size="11" font-weight="700">Producers</text>
+      <text x="280" y="35" text-anchor="middle" fill="#00b4d8" font-size="11" font-weight="700">KV Store</text>
+      <text x="504" y="35" text-anchor="middle" fill="#b388ff" font-size="11" font-weight="700">Control Plane</text>
+      <text x="730" y="35" text-anchor="middle" fill="#06d6a0" font-size="11" font-weight="700">Consumers</text>
+      <text x="940" y="35" text-anchor="middle" fill="#06d6a0" font-size="11" font-weight="700">Runtime</text>
+      <!-- lane lines -->
+      <line x1="70" y1="46" x2="70" y2="540" stroke="#f77f00" stroke-width="1" stroke-opacity="0.15"/>
+      <line x1="280" y1="46" x2="280" y2="540" stroke="#00b4d8" stroke-width="1" stroke-opacity="0.15"/>
+      <line x1="504" y1="46" x2="504" y2="540" stroke="#b388ff" stroke-width="1" stroke-opacity="0.15"/>
+      <line x1="730" y1="46" x2="730" y2="540" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.15"/>
+      <line x1="940" y1="46" x2="940" y2="540" stroke="#06d6a0" stroke-width="1" stroke-opacity="0.15"/>
+
+      <!-- ===== STEP 1: Signal Buffer ===== -->
+      <circle cx="504" cy="130" r="18" fill="rgba(247,127,0,0.15)" stroke="#f77f00" stroke-width="2" filter="url(#s-glow)"/>
+      <text x="504" y="135" text-anchor="middle" fill="#f77f00" font-size="14" font-weight="800">1</text>
+      <!-- CP writes to KV -->
+      <line x1="486" y1="130" x2="298" y2="130" stroke="#f77f00" stroke-width="1.5" marker-end="url(#s-ah-w)"/>
+      <text x="390" y="123" text-anchor="middle" fill="#f77f00" font-size="9" font-weight="600">mode = "buffer"</text>
+      <!-- KV notifies producers -->
+      <line x1="262" y1="136" x2="88" y2="136" stroke="#f77f00" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#s-ah-w)"/>
+      <text x="175" y="149" text-anchor="middle" fill="#888" font-size="8">watch notification</text>
+      <!-- Label -->
+      <text x="610" y="127" fill="#ccc" font-size="9.5" font-weight="600">Signal Buffer Mode</text>
+      <text x="610" y="141" fill="#777" font-size="8">Producers redirect to buffer stream</text>
+      <!-- checkpoint -->
+      <rect x="552" y="150" width="16" height="10" rx="2" fill="#f77f00" fill-opacity="0.4"/><text x="572" y="158" fill="#666" font-size="7">checkpoint</text>
+
+      <!-- ===== STEP 2: Wait In-Flight ===== -->
+      <circle cx="504" cy="196" r="18" fill="rgba(247,127,0,0.12)" stroke="#f77f00" stroke-width="2"/>
+      <text x="504" y="201" text-anchor="middle" fill="#f77f00" font-size="14" font-weight="800">2</text>
+      <!-- dashed wait line -->
+      <line x1="486" y1="196" x2="88" y2="196" stroke="#f77f00" stroke-width="1" stroke-dasharray="3,4" stroke-opacity="0.4"/>
+      <text x="610" y="193" fill="#ccc" font-size="9.5" font-weight="600">Wait for In-Flight</text>
+      <text x="610" y="207" fill="#777" font-size="8">Brief pause (~500ms)</text>
+      <rect x="552" y="216" width="16" height="10" rx="2" fill="#f77f00" fill-opacity="0.3"/><text x="572" y="224" fill="#666" font-size="7">checkpoint</text>
+
+      <!-- ===== STEP 3: Drain ===== -->
+      <circle cx="504" cy="262" r="18" fill="rgba(247,127,0,0.12)" stroke="#f77f00" stroke-width="2"/>
+      <text x="504" y="267" text-anchor="middle" fill="#f77f00" font-size="14" font-weight="800">3</text>
+      <!-- CP monitors consumers -->
+      <line x1="522" y1="262" x2="712" y2="262" stroke="#f77f00" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#s-ah-w)"/>
+      <text x="617" y="255" text-anchor="middle" fill="#888" font-size="8">poll pending = 0</text>
+      <text x="610" y="275" fill="#ccc" font-size="9.5" font-weight="600">Drain Consumers</text>
+      <text x="610" y="289" fill="#777" font-size="8">Wait until all partitions at zero pending</text>
+      <rect x="552" y="296" width="16" height="10" rx="2" fill="#f77f00" fill-opacity="0.3"/><text x="572" y="304" fill="#666" font-size="7">checkpoint</text>
+
+      <!-- ===== Phase divider arrow ===== -->
+      <path d="M504,310 L504,332" stroke="#00b4d8" stroke-width="2" marker-end="url(#s-ah)"/>
+
+      <!-- ===== STEP 4: Update Count ===== -->
+      <circle cx="504" cy="355" r="18" fill="rgba(0,180,216,0.15)" stroke="#00b4d8" stroke-width="2" filter="url(#s-glow)"/>
+      <text x="504" y="360" text-anchor="middle" fill="#00b4d8" font-size="14" font-weight="800">4</text>
+      <line x1="486" y1="355" x2="298" y2="355" stroke="#00b4d8" stroke-width="1.5" marker-end="url(#s-ah)"/>
+      <text x="390" y="348" text-anchor="middle" fill="#00b4d8" font-size="9" font-weight="600">partition_count = M</text>
+      <text x="610" y="352" fill="#ccc" font-size="9.5" font-weight="600">Update Partition Count</text>
+      <text x="610" y="366" fill="#777" font-size="8">Atomic KV write — point of no return</text>
+      <rect x="552" y="374" width="16" height="10" rx="2" fill="#00b4d8" fill-opacity="0.3"/><text x="572" y="382" fill="#666" font-size="7">checkpoint</text>
+
+      <!-- ===== STEP 5: Scale Consumers ===== -->
+      <circle cx="504" cy="415" r="18" fill="rgba(0,180,216,0.12)" stroke="#00b4d8" stroke-width="2"/>
+      <text x="504" y="420" text-anchor="middle" fill="#00b4d8" font-size="14" font-weight="800">5</text>
+      <line x1="522" y1="415" x2="922" y2="415" stroke="#06d6a0" stroke-width="1.5" marker-end="url(#s-ah-g)"/>
+      <text x="790" y="408" text-anchor="middle" fill="#06d6a0" font-size="9" font-weight="600">ScaleConsumers(N, M)</text>
+      <!-- runtime to consumers -->
+      <line x1="940" y1="425" x2="748" y2="425" stroke="#06d6a0" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#s-ah-g)"/>
+      <text x="844" y="438" text-anchor="middle" fill="#888" font-size="8">start/stop instances</text>
+      <text x="610" y="453" fill="#ccc" font-size="9.5" font-weight="600">Scale Consumers</text>
+      <rect x="552" y="460" width="16" height="10" rx="2" fill="#00b4d8" fill-opacity="0.3"/><text x="572" y="468" fill="#666" font-size="7">checkpoint</text>
+
+      <!-- ===== Phase divider arrow ===== -->
+      <path d="M504,475 L504,490" stroke="#06d6a0" stroke-width="2" marker-end="url(#s-ah-g)"/>
+
+      <!-- ===== STEP 6: Restore Direct ===== -->
+      <circle cx="504" cy="510" r="18" fill="rgba(6,214,160,0.15)" stroke="#06d6a0" stroke-width="2" filter="url(#s-glow)"/>
+      <text x="504" y="515" text-anchor="middle" fill="#06d6a0" font-size="14" font-weight="800">6</text>
+      <line x1="486" y1="510" x2="298" y2="510" stroke="#06d6a0" stroke-width="1.5" marker-end="url(#s-ah-g)"/>
+      <text x="390" y="503" text-anchor="middle" fill="#06d6a0" font-size="9" font-weight="600">mode = "direct"</text>
+      <!-- KV notifies producers -->
+      <line x1="262" y1="516" x2="88" y2="516" stroke="#06d6a0" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#s-ah-g)"/>
+      <text x="175" y="529" text-anchor="middle" fill="#888" font-size="8">resume hash % M routing</text>
+      <text x="610" y="507" fill="#ccc" font-size="9.5" font-weight="600">Restore Direct Mode</text>
+      <rect x="552" y="524" width="16" height="10" rx="2" fill="#06d6a0" fill-opacity="0.3"/><text x="572" y="532" fill="#666" font-size="7">checkpoint</text>
+
+      <!-- ===== STEP 7: Replay (top-right area) ===== -->
+      <circle cx="834" cy="510" r="18" fill="rgba(6,214,160,0.18)" stroke="#06d6a0" stroke-width="2.5" filter="url(#s-glow)"/>
+      <text x="834" y="515" text-anchor="middle" fill="#06d6a0" font-size="14" font-weight="800">7</text>
+      <!-- arrow from step 6 to step 7 -->
+      <path d="M522,510 C600,510 750,510 816,510" stroke="#06d6a0" stroke-width="1.5" fill="none" marker-end="url(#s-ah-g)"/>
+      <text x="880" y="503" fill="#ccc" font-size="9.5" font-weight="600">Replay Buffer</text>
+      <text x="880" y="517" fill="#777" font-size="8">hash % M with</text>
+      <text x="880" y="529" fill="#777" font-size="8">idempotent msg IDs</text>
+      <rect x="852" y="538" width="16" height="10" rx="2" fill="#06d6a0" fill-opacity="0.4"/><text x="872" y="546" fill="#666" font-size="7">checkpoint → done</text>
+
+      <!-- ===== Vertical flow connectors (steps within same phase) ===== -->
+      <path d="M504,148 L504,178" stroke="#f77f00" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#s-ah-w)"/>
+      <path d="M504,214 L504,244" stroke="#f77f00" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#s-ah-w)"/>
+      <path d="M504,373 L504,397" stroke="#00b4d8" stroke-width="1.5" stroke-opacity="0.4" marker-end="url(#s-ah)"/>
+
+      <!-- ===== Legend ===== -->
+      <rect x="22" y="108" width="10" height="10" rx="2" fill="#f77f00" fill-opacity="0.4"/>
+      <text x="38" y="117" fill="#888" font-size="8">= checkpoint saved to KV</text>
+    </svg>
+  </section>
+
+  <section>
+    <h2>Walkthrough: Scale 2 &rarr; 3 Partitions</h2>
+    <div class="grid2">
+      <div>
+        <p style="font-size:0.7em; color:var(--accent); font-weight:700; margin-bottom:0.3em;">Before (steady state)</p>
+        <div class="diagram" style="font-size:0.5em; line-height:1.7; padding:0.8em;">
+KV: count=<span class="accent">2</span>, mode=<span class="good">direct</span>
+
+order-A &rarr; hash%2=<span class="accent">0</span> &rarr; Consumer-0
+order-B &rarr; hash%2=<span class="accent">1</span> &rarr; Consumer-1
+        </div>
+        <p style="font-size:0.7em; color:var(--warn); font-weight:700; margin-bottom:0.3em;">Step 1-3: Buffer &amp; Drain</p>
+        <div class="diagram" style="font-size:0.5em; line-height:1.7; padding:0.8em;">
+KV: count=2, mode=<span class="warn">buffer</span>
+
+order-C &rarr; <span class="warn">Buffer Stream</span>
+order-D &rarr; <span class="warn">Buffer Stream</span>
+Consumer-0 <span class="dim">draining...</span>
+Consumer-1 <span class="dim">draining...</span>
+        </div>
+      </div>
+      <div>
+        <p style="font-size:0.7em; color:var(--accent); font-weight:700; margin-bottom:0.3em;">Step 4-5: Update &amp; Scale</p>
+        <div class="diagram" style="font-size:0.5em; line-height:1.7; padding:0.8em;">
+KV: count=<span class="good">3</span>, mode=<span class="warn">buffer</span>
+
+Consumer-0 <span class="good">ready</span>
+Consumer-1 <span class="good">ready</span>
+Consumer-2 <span class="good">NEW</span>
+        </div>
+        <p style="font-size:0.7em; color:var(--good); font-weight:700; margin-bottom:0.3em;">Step 6-7: Restore &amp; Replay</p>
+        <div class="diagram" style="font-size:0.5em; line-height:1.7; padding:0.8em;">
+KV: count=<span class="good">3</span>, mode=<span class="good">direct</span>
+
+order-E &rarr; hash%3=0 &rarr; Consumer-0
+<span class="good">Replay</span>: C&rarr;P.1  D&rarr;P.2
+<span class="good">Zero lost. Zero dupes.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</section>
+
+<!-- ======================== TECHNICAL DEEP DIVE ======================== -->
+<section>
+  <section class="center">
+    <h1>Technical Deep Dive</h1>
+  </section>
+
+  <section>
+    <h2>Producer Protocol (Any Language)</h2>
+    <div class="diagram" style="font-size:0.56em; line-height:1.65; text-align:left; padding-left:2em;">
+<span class="accent">// Startup</span>
+local_mode  = kv.get("mode")             <span class="dim">// "direct" or "buffer"</span>
+local_count = kv.get("partition_count")
+
+<span class="accent">// Async watch &mdash; react to changes</span>
+kv.<span class="good">watch</span>("mode",            v => local_mode  = v)
+kv.<span class="good">watch</span>("partition_count", v => local_count = int(v))
+
+<span class="accent">// Publish</span>
+<span class="warn">function</span> publish(msg):
+    <span class="accent">if</span> local_mode == <span class="warn">"buffer"</span>:
+        js.publish(<span class="warn">buffer_subject</span>, msg)
+    <span class="accent">else</span>:
+        partition = <span class="good">hash</span>(msg.key) % local_count
+        js.publish(prefix + "." + partition, msg)
+    </div>
+    <p class="small">~15 lines. Go, Python, Java, Rust, Node &mdash; any language with a KV client.</p>
+  </section>
+
+  <section>
+    <h2>KV Signaling vs Traditional RPC</h2>
+    <div class="grid2">
+      <div class="card">
+        <h3 style="color:var(--bad);">RPC Coordination</h3>
+        <div class="diagram" style="font-size:0.5em; padding:0.6em;">
+Coordinator <span class="bad">&rarr; RPC &rarr;</span> Producer 1
+Coordinator <span class="bad">&rarr; RPC &rarr;</span> Producer 2
+Coordinator <span class="bad">&rarr; RPC &rarr;</span> Producer 3 <span class="bad">(down!)</span>
+<span class="bad">BLOCKED</span> &mdash; custom SDK required
+        </div>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--good);">KV Watch</h3>
+        <div class="diagram" style="font-size:0.5em; padding:0.6em;">
+Coordinator &rarr; <span class="good">KV: mode=buffer</span>
+                 <span class="dim">&darr; (watch)</span>
+Producer 1 <span class="good">reacts</span>
+Producer 2 <span class="good">reacts</span>
+Producer 3 <span class="dim">(down &mdash; no problem)</span>
+        </div>
+      </div>
+    </div>
+    <div class="callout">No coupling. No custom SDK. Producers join/leave freely. Down producer doesn't block repartition.</div>
+  </section>
+
+  <section>
+    <h2>Crash Recovery: Leader Failover</h2>
+    <div class="diagram" style="font-size:0.52em; line-height:1.8;">
+  <span class="accent">Replica A (leader)</span>               <span class="accent">Replica B (standby)</span>
+       |                                  |
+  Step 1: Buffer  <span class="good">&#10003;</span>                   |
+  Step 2: Wait    <span class="good">&#10003;</span>                   |
+  Step 3: Drain   <span class="good">&#10003;</span>                   |
+  <span class="bad">&#10007; CRASH</span>                              |
+       |                          <span class="good">elected leader</span>
+       |                        reads KV: <span class="accent">step=3</span>
+       |                        skips 1-3, resumes:
+       |                            Step 4 <span class="good">&#10003;</span>
+       |                            Step 5 <span class="good">&#10003;</span>
+       |                            Step 6 <span class="good">&#10003;</span>
+       |                            Step 7 <span class="good">&#10003;</span>  <span class="good">DONE</span>
+    </div>
+    <div class="callout">Each step checkpointed to KV. Any replica resumes from exact failure point. Every step is idempotent &mdash; safe to re-execute.</div>
+  </section>
+
+  <section>
+    <h2>Auto-Scaler: Lag-Based Decisions</h2>
+    <div class="diagram" style="font-size:0.54em; line-height:1.65; text-align:left; padding-left:1.5em;">
+<span class="accent">Loop</span> (leader only, every 10s):
+  total_lag = sum(num_pending + num_ack_pending) across all consumers
+
+  if total_lag > <span class="bad">high_watermark</span> AND current &lt; max:
+      KV: desired_partitions = current + 1   <span class="dim">&rarr; Reconciler triggers scale-up</span>
+
+  if total_lag &lt; <span class="good">low_watermark</span> AND current > min:
+      KV: desired_partitions = current - 1   <span class="dim">&rarr; Reconciler triggers scale-down</span>
+
+  cooldown: 30s between decisions            <span class="dim">&rarr; prevents oscillation</span>
+    </div>
+    <div class="callout">Auto-scaler writes <code>desired_partitions</code> to KV. <strong>Reconciler</strong> watches and triggers the Scaler. Separation = stateless, restartable.</div>
+  </section>
+
+  <section>
+    <h2>Pluggable Backends &amp; Error Handling</h2>
+    <div class="grid2">
+      <div>
+        <div class="diagram" style="font-size:0.55em; text-align:left; padding:0.8em;">
+<span class="accent">interface</span> ConsumerBackend:
+  ScaleConsumers(old, new) &rarr; error
+        </div>
+        <div class="grid2" style="gap:0.5em;">
+          <div class="card"><h3>Docker</h3><p>Container per partition. Local dev.</p></div>
+          <div class="card"><h3>Kubernetes</h3><p>StatefulSet replicas. Pod ordinal = partition ID.</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>DLQ + Retries</h3>
+        <ul>
+          <li>Failed messages &rarr; DLQ stream with metadata</li>
+          <li>KV writes: 3 retries, 500ms backoff</li>
+          <li>Consumer scaling: 3 retries, 1s backoff</li>
+          <li>Replay publish: idempotent msg IDs</li>
+          <li>All retries exhausted &rarr; revert to direct mode</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</section>
+
+<!-- ======================== BUSINESS IMPACT ======================== -->
+<section>
+  <h2>Business Impact: Before vs After</h2>
+  <div class="grid2">
+    <div class="card" style="border-color: rgba(239,71,111,0.3);">
+      <h3 style="color:var(--bad);">Before (Static)</h3>
+      <ul>
+        <li>Partition count = permanent decision</li>
+        <li>Over-provision for peak = waste $$$</li>
+        <li>Under-provision = incidents under load</li>
+        <li>Migration = downtime + risk + weeks</li>
+        <li>Can never scale down</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: rgba(6,214,160,0.3);">
+      <h3 style="color:var(--good);">After (Dynamic)</h3>
+      <ul>
+        <li>Start with 1, grow as needed</li>
+        <li>Scale up before peak in seconds</li>
+        <li>Scale down after &mdash; stop paying idle</li>
+        <li>Zero downtime, zero message loss</li>
+        <li>Auto-scale on lag, or manual trigger</li>
+      </ul>
+    </div>
+  </div>
+  <br>
+  <div class="chat">
+    <div class="chat-avatar" style="background:var(--good);">BIZ</div>
+    <div class="chat-bubble"><div class="name biz">Finance</div><p>Holiday is over. Can we scale down?</p></div>
+  </div>
+  <div class="chat chat-right">
+    <div class="chat-avatar" style="background:var(--accent);">DEV</div>
+    <div class="chat-bubble"><div class="name dev">Backend Lead</div><p>Already done. Auto-scaler saw low lag, scaled 10 &rarr; 2. Stopped paying for 8 idle consumers yesterday.</p></div>
+  </div>
+</section>
+
+<!-- ======================== NOVELTY ======================== -->
+<section>
+  <h2>Novelty: Research Summary</h2>
+  <table>
+    <thead>
+      <tr><th>Capability</th><th>Kafka</th><th>Kinesis</th><th>Pravega</th><th>This</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Arbitrary N &rarr; M</td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-warn">Split</span></td><td><span class="tag tag-good">Yes</span></td></tr>
+      <tr><td>Scale down</td><td><span class="tag tag-bad">Never</span></td><td><span class="tag tag-warn">Merge</span></td><td><span class="tag tag-warn">Merge</span></td><td><span class="tag tag-good">Yes</span></td></tr>
+      <tr><td>Language-agnostic</td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-good">KV</span></td></tr>
+      <tr><td>Crash-resumable</td><td><span class="tag tag-bad">N/A</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-bad">No</span></td><td><span class="tag tag-good">Yes</span></td></tr>
+      <tr><td>No custom SDK</td><td><span class="tag tag-bad">Need</span></td><td><span class="tag tag-bad">Need</span></td><td><span class="tag tag-bad">Need</span></td><td><span class="tag tag-good">KV only</span></td></tr>
+    </tbody>
+  </table>
+  <div class="callout good" style="margin-top:0.8em;">
+    Searched patents (IBM, Amazon), academia (VLDB, SIGMOD), all major streaming products, blogs, and community.<br>
+    <strong>No existing system combines all five.</strong> The specific composition is novel.
+  </div>
+</section>
+
+<!-- ======================== LIVE DEMO ======================== -->
+<section>
+  <section class="center">
+    <h1>Live Demo</h1>
+  </section>
+
+  <section>
+    <h2>Demo: What to Watch</h2>
+    <div class="grid2">
+      <div class="card">
+        <h3>Scenario</h3>
+        <ul>
+          <li>Producer publishing orders at 50/s</li>
+          <li>Start with 2 partition consumers</li>
+          <li>Scale up 2 &rarr; 4 via API</li>
+          <li>Watch buffer/drain/replay in dashboard</li>
+          <li>Scale down 4 &rarr; 2</li>
+          <li>Verify zero loss, zero dupes</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Correctness Checks</h3>
+        <ul>
+          <li>Published count == consumed count</li>
+          <li>Per-key sequences contiguous</li>
+          <li>No gaps (zero loss)</li>
+          <li>No duplicates</li>
+          <li>DLQ stays empty</li>
+          <li>Whole repartition in seconds</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</section>
+
+<!-- ======================== SUMMARY ======================== -->
+<section class="center">
+  <h2>Buffer-Drain-Replay</h2>
+  <br>
+  <div class="grid3">
+    <div style="text-align:center;"><div class="big-number">7</div><p class="small">Checkpointed steps</p></div>
+    <div style="text-align:center;"><div class="big-number">0</div><p class="small">Messages lost</p></div>
+    <div style="text-align:center;"><div class="big-number">2</div><p class="small">KV keys to watch</p></div>
+  </div>
+  <br>
+  <div class="callout good" style="text-align:center; font-size:0.85em;">
+    Partition count is no longer a permanent decision.<br>
+    <strong>It's just another runtime configuration.</strong>
+  </div>
+</section>
+
+<!-- ======================== Q&A ======================== -->
+<section class="center">
+  <h1>Q &amp; A</h1>
+</section>
+
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({
+  hash: true, slideNumber: 'c/t', width: 1280, height: 720, margin: 0.08,
+  transition: 'slide', controlsTutorial: false, progress: true, center: false
+});
+</script>
+</body>
+</html>

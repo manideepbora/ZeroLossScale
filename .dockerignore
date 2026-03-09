@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+tests/
+*_test.go
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.creds
+
+# Docker volumes
+nats-data/
+docker-data/

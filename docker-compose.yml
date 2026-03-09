@@ -1,0 +1,75 @@
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # HTTP monitoring
+    command: ["--config", "/etc/nats/nats-server.conf"]
+    volumes:
+      - nats-data:/data
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
+    healthcheck:
+      test: ["CMD", "nats-server", "--help"]
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+
+  controlplane:
+    build:
+      context: .
+      target: controlplane
+    environment:
+      - NATS_URL=nats://nats:4222
+      - API_PORT=9090
+      - DOCKER_NETWORK=nats_poc_default
+      - CONSUMER_IMAGE=nats_poc-consumer
+      - INTERNAL_NATS_URL=nats://nats:4222
+      # Optional: auto-register a stream on startup.
+      # If not set, the producer will register via POST /register.
+      # - STREAM_NAME=MY_ORDERS
+      # - INITIAL_PARTITIONS=1
+    ports:
+      - "9090:9090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  producer:
+    build:
+      context: .
+      target: producer
+    environment:
+      - NATS_URL=nats://nats:4222
+      - STREAM_NAME=MY_ORDERS
+      - CONTROLPLANE_URL=http://controlplane:9090
+      - PUBLISH_RATE=10
+      - NUM_KEYS=5
+      - INITIAL_PARTITIONS=1
+    depends_on:
+      nats:
+        condition: service_healthy
+      controlplane:
+        condition: service_started
+    restart: unless-stopped
+
+  # Consumer image is built by compose but NOT started directly.
+  # The controlplane manages consumer containers via Docker socket.
+  consumer:
+    build:
+      context: .
+      target: consumer
+    profiles:
+      - build-only
+    environment:
+      - NATS_URL=nats://nats:4222
+      - PARTITION_ID=0
+      - STREAM_NAME=MY_ORDERS
+      - SUBJECT_PREFIX=MY_ORDERS
+
+volumes:
+  nats-data:

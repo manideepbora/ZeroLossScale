@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: consumer
+  namespace: nats-poc
+spec:
+  selector:
+    app: consumer
+  ports:
+    - name: health
+      port: 8080
+      targetPort: 8080
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: consumer
+  namespace: nats-poc
+spec:
+  serviceName: consumer
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: consumer
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: consumer
+          image: nats-poc-consumer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: health
+          env:
+            - name: NATS_URL
+              value: "nats://nats.nats-poc.svc.cluster.local:4222"
+            - name: STREAM_NAME
+              value: "AUTO_ORDERS"
+            # PARTITION_ID is NOT set — derived from StatefulSet pod hostname ordinal.
+            # e.g. consumer-0 -> partition 0, consumer-1 -> partition 1, etc.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+# HPA scales consumer StatefulSet based on CPU utilization.
+# The controlplane also scales via the repartition protocol when desired_partitions changes.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: consumer
+  namespace: nats-poc
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: consumer
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

@@ -1,0 +1,46 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/dashboard
+/diag
+/nats-poc
+/producer
+/consumer
+/controlplane
+
+# Test binary
+*.test
+
+# Go build cache
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.creds
+
+# NATS data (local dev)
+nats-data/
+
+# Docker volumes
+docker-data/

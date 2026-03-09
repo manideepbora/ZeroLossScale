@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: controlplane
+  namespace: nats-poc
+spec:
+  selector:
+    app: controlplane
+  ports:
+    - name: api
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controlplane
+  namespace: nats-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: controlplane
+  template:
+    metadata:
+      labels:
+        app: controlplane
+    spec:
+      serviceAccountName: controlplane
+      containers:
+        - name: controlplane
+          image: nats-poc-controlplane:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9090
+              name: api
+          env:
+            - name: BACKEND
+              value: "k8s"
+            - name: NATS_URL
+              value: "nats://nats.nats-poc.svc.cluster.local:4222"
+            - name: STREAM_NAME
+              value: "AUTO_ORDERS"
+            - name: INITIAL_PARTITIONS
+              value: "3"
+            - name: K8S_NAMESPACE
+              value: "nats-poc"
+            - name: K8S_STATEFULSET
+              value: "consumer"
+            - name: API_PORT
+              value: "9090"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
