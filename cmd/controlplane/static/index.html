@@ -572,8 +572,8 @@ async function scaleTo(count) {
   try {
     const res = await fetch(`/scale?partitions=${count}`, { method: 'POST' });
     const data = await res.json();
-    if (data.status === 'ok') {
-      addLog(`Scaled to ${data.partitions} partitions (${(data.consumers||[]).length} containers)`, 'success');
+    if (data.status === 'ok' || data.status === 'accepted') {
+      addLog(`Scale ${data.status}: ${data.current || state.partitions} -> ${data.desired || data.partitions} partitions`, 'success');
     } else {
       addLog(`Scale failed: ${JSON.stringify(data)}`, 'error');
     }
