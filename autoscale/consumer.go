@@ -32,6 +32,8 @@ type ConsumerPool struct {
 
 	totalReceived   atomic.Int64
 	totalViolations atomic.Int64
+	totalGaps       atomic.Int64 // number of gap events (skipped sequences)
+	totalMissing    atomic.Int64 // total missing messages across all gaps
 }
 
 func NewConsumerPool(js jetstream.JetStream, streamName, prefix string, cfg Config) *ConsumerPool {
@@ -171,10 +173,17 @@ func (cp *ConsumerPool) startConsumer(ctx context.Context, partition int, result
 			return
 		}
 
-		// Check per-key ordering.
-		if last, ok := lastSeqByKey[m.Key]; ok && m.Sequence <= last {
-			cp.totalViolations.Add(1)
-			log.Printf("[consumer] VIOLATION partition=%d key=%s seq=%d after=%d", partition, m.Key, m.Sequence, last)
+		// Check per-key ordering and detect gaps.
+		if last, ok := lastSeqByKey[m.Key]; ok {
+			if m.Sequence <= last {
+				cp.totalViolations.Add(1)
+				log.Printf("[consumer] VIOLATION partition=%d key=%s seq=%d after=%d", partition, m.Key, m.Sequence, last)
+			} else if m.Sequence > last+1 {
+				gap := m.Sequence - last - 1
+				cp.totalGaps.Add(1)
+				cp.totalMissing.Add(int64(gap))
+				log.Printf("[consumer] GAP partition=%d key=%s expected=%d got=%d missing=%d", partition, m.Key, last+1, m.Sequence, gap)
+			}
 		}
 		lastSeqByKey[m.Key] = m.Sequence
 
@@ -183,6 +192,11 @@ func (cp *ConsumerPool) startConsumer(ctx context.Context, partition int, result
 		result.Messages = append(result.Messages, m)
 		// Update per-account consumed sequence.
 		if as, ok := cp.consumedSeqs[m.Key]; ok {
+			if m.Sequence > as.Sequence+1 {
+				gap := m.Sequence - as.Sequence - 1
+				as.Gaps++
+				as.GapTotal += gap
+			}
 			as.Sequence = m.Sequence
 			as.Partition = partition
 		} else {
@@ -246,3 +260,5 @@ func (cp *ConsumerPool) ConsumedSeqs() map[string]AccountSeq {
 
 func (cp *ConsumerPool) TotalReceived() int64   { return cp.totalReceived.Load() }
 func (cp *ConsumerPool) TotalViolations() int64 { return cp.totalViolations.Load() }
+func (cp *ConsumerPool) TotalGaps() int64       { return cp.totalGaps.Load() }
+func (cp *ConsumerPool) TotalMissing() int64    { return cp.totalMissing.Load() }

@@ -244,6 +244,8 @@ type SequenceEntry struct {
 	Sequence  int    `json:"sequence"`
 	Partition int    `json:"partition"`
 	Source    string `json:"source"`
+	Gaps      int    `json:"gaps"`
+	GapTotal  int    `json:"gap_total"`
 }
 
 func (s *Service) getSequenceState(ctx context.Context) (map[string]int, map[string]SequenceEntry) {

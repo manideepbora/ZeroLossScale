@@ -264,7 +264,7 @@
 <div class="card" style="margin-bottom: 1.25rem;">
   <h2>Account Sequence Tracking</h2>
   <p style="color: var(--muted); font-size: 0.78rem; margin-bottom: 0.5rem;">
-    Per-account published vs consumed sequences. <span class="red" id="mismatchBanner" style="display:none;">MISMATCH DETECTED</span>
+    Per-account published vs consumed sequences. <span class="red" id="mismatchBanner" style="display:none;">MISMATCH DETECTED</span> <span class="red" id="gapBanner" style="display:none;">GAPS DETECTED — MESSAGES MISSING</span>
   </p>
   <div style="overflow-x: auto;">
     <table class="seq-table" id="seqTable">
@@ -275,11 +275,13 @@
           <th>Consumed Seq</th>
           <th>Partition</th>
           <th>Lag</th>
+          <th>Gaps</th>
+          <th>Missing</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody id="seqTableBody">
-        <tr><td colspan="6" style="color:var(--muted);">Waiting for data...</td></tr>
+        <tr><td colspan="8" style="color:var(--muted);">Waiting for data...</td></tr>
       </tbody>
     </table>
   </div>
@@ -458,22 +460,26 @@ function updateSequenceTable(pubSeqs, consSeqs) {
   const accounts = [...allKeys].sort();
 
   if (accounts.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No sequence data yet (start the producer)</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--muted);">No sequence data yet (start the producer)</td></tr>';
     document.getElementById('mismatchBanner').style.display = 'none';
     return;
   }
 
   let hasMismatch = false;
+  let hasGaps = false;
   const rows = accounts.map(key => {
     const pubSeq = pubSeqs[key] || 0;
     const consEntry = consSeqs[key];
     const consSeq = consEntry ? consEntry.sequence : 0;
     const partition = consEntry ? consEntry.partition : '-';
+    const gapCount = consEntry ? (consEntry.gaps || 0) : 0;
+    const gapTotal = consEntry ? (consEntry.gap_total || 0) : 0;
     const lag = pubSeq - consSeq;
 
     const isMismatch = consSeq > pubSeq + 5;
     const isLagging = lag > 10;
     if (isMismatch) hasMismatch = true;
+    if (gapTotal > 0) hasGaps = true;
 
     let lagClass = 'lag-ok';
     let lagText = lag.toString();
@@ -481,18 +487,26 @@ function updateSequenceTable(pubSeqs, consSeqs) {
     else if (lag > 50) { lagClass = 'lag-bad'; }
     else if (isLagging) { lagClass = 'lag-warn'; }
 
+    const gapClass = gapTotal > 0 ? 'lag-bad' : 'lag-ok';
+    const gapCountClass = gapCount > 0 ? 'lag-bad' : 'lag-ok';
+
     let statusBadge;
-    if (isMismatch) statusBadge = '<span class="badge mismatch">MISMATCH</span>';
+    if (gapTotal > 0) statusBadge = '<span class="badge mismatch">MISSING</span>';
+    else if (isMismatch) statusBadge = '<span class="badge mismatch">MISMATCH</span>';
     else if (lag === 0) statusBadge = '<span class="badge ok">IN SYNC</span>';
     else if (isLagging) statusBadge = '<span class="badge" style="background:rgba(251,191,36,0.15);color:var(--yellow);">LAGGING</span>';
     else statusBadge = '<span class="badge ok">OK</span>';
 
-    return `<tr class="${isMismatch ? 'mismatch-row' : ''}">
+    const rowClass = gapTotal > 0 ? 'mismatch-row' : (isMismatch ? 'mismatch-row' : '');
+
+    return `<tr class="${rowClass}">
       <td style="color:var(--accent);font-weight:bold;">${key}</td>
       <td>${fmt(pubSeq)}</td>
       <td>${fmt(consSeq)}</td>
       <td>${partition !== '-' ? 'P' + partition : '-'}</td>
       <td class="${lagClass}">${lagText}</td>
+      <td class="${gapCountClass}">${gapCount}</td>
+      <td class="${gapClass}">${gapTotal}</td>
       <td>${statusBadge}</td>
     </tr>`;
   });
@@ -501,6 +515,9 @@ function updateSequenceTable(pubSeqs, consSeqs) {
   const banner = document.getElementById('mismatchBanner');
   banner.style.display = hasMismatch ? 'inline' : 'none';
   if (hasMismatch) banner.style.animation = 'pulse 1s infinite';
+  const gapBanner = document.getElementById('gapBanner');
+  gapBanner.style.display = hasGaps ? 'inline' : 'none';
+  if (hasGaps) gapBanner.style.animation = 'pulse 1s infinite';
 }
 
 function updateArchDiagram(data) {

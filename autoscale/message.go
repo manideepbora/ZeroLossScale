@@ -21,4 +21,6 @@ type AccountSeq struct {
 	Key       string `json:"key"`
 	Sequence  int    `json:"sequence"`
 	Partition int    `json:"partition"`
+	Gaps      int    `json:"gaps"`      // number of skipped sequences detected
+	GapTotal  int    `json:"gap_total"` // total missing messages across all gaps
 }

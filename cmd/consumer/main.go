@@ -106,8 +106,11 @@ func main() {
 
 	var received atomic.Int64
 	var violations atomic.Int64
+	var gaps atomic.Int64
+	var totalMissing atomic.Int64
 	var mu sync.Mutex
 	lastSeqByKey := make(map[string]int)
+	gapsByKey := make(map[string][2]int) // key -> [gap_events, total_missing]
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		received.Add(1)
@@ -120,9 +123,20 @@ func main() {
 		}
 
 		mu.Lock()
-		if last, ok := lastSeqByKey[m.Key]; ok && m.Sequence <= last {
-			violations.Add(1)
-			log.Printf("[consumer] VIOLATION partition=%d key=%s seq=%d after=%d", partitionID, m.Key, m.Sequence, last)
+		if last, ok := lastSeqByKey[m.Key]; ok {
+			if m.Sequence <= last {
+				violations.Add(1)
+				log.Printf("[consumer] VIOLATION partition=%d key=%s seq=%d after=%d", partitionID, m.Key, m.Sequence, last)
+			} else if m.Sequence > last+1 {
+				gap := m.Sequence - last - 1
+				gaps.Add(1)
+				totalMissing.Add(int64(gap))
+				g := gapsByKey[m.Key]
+				g[0]++
+				g[1] += gap
+				gapsByKey[m.Key] = g
+				log.Printf("[consumer] GAP partition=%d key=%s expected=%d got=%d missing=%d", partitionID, m.Key, last+1, m.Sequence, gap)
+			}
 		}
 		lastSeqByKey[m.Key] = m.Sequence
 		mu.Unlock()
@@ -150,11 +164,16 @@ func main() {
 			case <-ticker.C:
 				mu.Lock()
 				for k, seq := range lastSeqByKey {
-					data, _ := json.Marshal(map[string]any{
+					entry := map[string]any{
 						"sequence":  seq,
 						"partition": partitionID,
 						"source":    "consumer",
-					})
+					}
+					if g, ok := gapsByKey[k]; ok {
+						entry["gaps"] = g[0]
+						entry["gap_total"] = g[1]
+					}
+					data, _ := json.Marshal(entry)
 					seqKV.Put(ctx, fmt.Sprintf("cons.p%d.%s", partitionID, k), data)
 				}
 				mu.Unlock()
@@ -165,8 +184,8 @@ func main() {
 	// Health endpoint.
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"partition":%d,"received":%d,"violations":%d,"stream":"%s","status":"ok"}`,
-			partitionID, received.Load(), violations.Load(), streamName)
+		fmt.Fprintf(w, `{"partition":%d,"received":%d,"violations":%d,"gaps":%d,"missing":%d,"stream":"%s","status":"ok"}`,
+			partitionID, received.Load(), violations.Load(), gaps.Load(), totalMissing.Load(), streamName)
 	})
 	go func() {
 		log.Printf("[consumer] health endpoint on :%s/health", healthPort)
@@ -176,8 +195,8 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	log.Printf("[consumer] shutting down. partition=%d received=%d violations=%d",
-		partitionID, received.Load(), violations.Load())
+	log.Printf("[consumer] shutting down. partition=%d received=%d violations=%d gaps=%d missing=%d",
+		partitionID, received.Load(), violations.Load(), gaps.Load(), totalMissing.Load())
 	cc.Drain()
 
 	// Delete the durable consumer on shutdown so the control plane can recreate cleanly.

@@ -130,7 +130,9 @@ func main() {
 				mu.Lock()
 				for k, seq := range seqs {
 					data, _ := json.Marshal(map[string]any{"sequence": seq, "source": "producer"})
-					seqKV.Put(ctx, "pub."+k, data)
+					if _, err := seqKV.Put(ctx, "pub."+k, data); err != nil {
+						log.Printf("[producer] WARNING: failed to report sequence for %s: %v", k, err)
+					}
 				}
 				mu.Unlock()
 			}
