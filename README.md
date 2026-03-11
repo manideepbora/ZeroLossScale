@@ -1,4 +1,4 @@
-# NATS Autoscale Framework
+# BDS implementation using NATS 
 
 **Zero-downtime dynamic partitioning** for NATS JetStream with per-key ordering, no message loss, and HA controlplane. Scale consumers up and down while producers keep publishing — no restarts, no coordination, no downtime.
 
