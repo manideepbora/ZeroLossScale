@@ -1,4 +1,4 @@
-# BDS implementation using NATS 
+# Buffer Drain Replay (BDR) implementation using NATS
 
 **Zero-downtime dynamic partitioning** for NATS JetStream with per-key ordering, no message loss, and HA controlplane. Scale consumers up and down while producers keep publishing — no restarts, no coordination, no downtime.
 
@@ -45,7 +45,7 @@ Any application in any language (Go, Java, Python, etc.) can use this framework.
 3. **Producers watch KV** — `mode` and `partition_count` keys tell them where to publish
 4. **Consumers** (one per partition) read from their filtered subject, ACK each message
 5. **To scale** — call `POST /scale?partitions=5` or write `desired_partitions` to KV
-6. **Leader's reconciler** detects the change and runs the 7-step repartition protocol
+6. **Leader's reconciler** detects the change and runs the repartition protocol
 7. **Producers auto-switch** to buffer mode via KV watch — zero code changes, zero restarts
 
 ### Naming convention
@@ -120,7 +120,7 @@ The controlplane includes an optional lag-based auto-scaler. When enabled, it pe
 - **Total pending < low watermark** → scale down by 1 partition
 - A cooldown period prevents rapid oscillation
 
-The auto-scaler only writes the *desired* count — the existing reconciler handles the full 7-step repartition protocol. This works on both Docker and Kubernetes backends.
+The auto-scaler only writes the *desired* count — the existing reconciler handles the full repartition protocol. This works on both Docker and Kubernetes backends.
 
 ```
   [AutoScaler]                    [Reconciler]               [Scaler]
@@ -134,7 +134,7 @@ The auto-scaler only writes the *desired* count — the existing reconciler hand
                 └─────────────────► watch KV change             │
                                        │                        │
                                   desired != current?           │
-                                  ─────────────────────────► 7-step repartition
+                                  ─────────────────────────► repartition
                                                                 │
                                                            buffer → drain →
                                                            scale → replay
@@ -229,7 +229,7 @@ Set stream replicas to 3 in your config for data durability.
 
 ### Kubernetes deployment
 
-The controlplane supports native Kubernetes via `BACKEND=k8s`. Consumers run as a **StatefulSet** where each pod's ordinal maps directly to its partition ID (`consumer-0` → partition 0, `consumer-3` → partition 3). No `client-go` dependency — the K8s API is called via raw REST with in-cluster service account credentials.
+The controlplane supports native Kubernetes via `BACKEND=k8s`. Consumers run as a **StatefulSet** where each pod's ordinal maps directly to its partition ID (`consumer-0` → partition 0, `consumer-3` → partition 3). For multi-stream deployments, the first registered stream uses the base StatefulSet name (e.g., `consumer`), and subsequent streams use `{base}-{streamName}` (e.g., `consumer-payments`). No `client-go` dependency — the K8s API is called via raw REST with in-cluster service account credentials.
 
 #### Architecture
 
@@ -239,7 +239,7 @@ The controlplane supports native Kubernetes via `BACKEND=k8s`. Consumers run as 
   │                                                                  │
   │  Deployment: controlplane (BACKEND=k8s)                         │
   │    ├── patches StatefulSet replicas via K8s REST API            │
-  │    ├── runs repartition protocol (7-step, checkpointed)        │
+  │    ├── runs v2 repartition protocol (checkpointed)             │
   │    └── leader election via NATS KV                             │
   │                                                                  │
   │  StatefulSet: consumer (replicas: N)                            │
@@ -275,7 +275,7 @@ kubectl -n nats-poc get pods -l app=consumer -w
 
 # Scale partitions via API
 kubectl -n nats-poc port-forward svc/controlplane 9090:9090
-curl -X POST 'http://localhost:9090/scale?partitions=5'
+curl -X POST 'http://localhost:9090/scale?stream=MY_ORDERS&partitions=5'
 ```
 
 #### Build images for K8s
@@ -562,16 +562,17 @@ docker run -e CONSUMER_IMAGE=my-java-consumer:latest ... nats_poc-controlplane
 
 ```bash
 # Scale to 5 partitions — controlplane handles everything
-curl -X POST 'http://localhost:9090/scale?partitions=5'
+curl -X POST 'http://localhost:9090/scale?stream=MY_ORDERS&partitions=5'
 ```
 
 The controlplane will:
 1. Set KV `mode` → `"buffer"` (all producers auto-switch)
 2. Drain consumers
-3. Stop/start containers
-4. Update KV `partition_count`
-5. Set KV `mode` → `"direct"` (all producers auto-switch back)
-6. Replay buffered messages
+3. Update KV `partition_count`
+4. Restart consumers at new count
+5. Replay buffered messages to new partition mapping
+6. Set KV `mode` → `"direct"` (all producers auto-switch back)
+7. Purge buffer
 
 Your producer and consumer code doesn't change at all.
 
@@ -598,22 +599,24 @@ partition = h % count
 |-----------|-------------------|---------------------|
 | **Producer** | Watch KV, publish to subject | Creates streams/KV/DLQ, signals mode changes |
 | **Consumer** | Read `PARTITION_ID`, consume, ACK | Starts/stops containers, routes poison msgs to DLQ |
-| **Scaling** | Trigger via API or KV write | Full 7-step repartition with checkpointing + retry |
+| **Scaling** | Trigger via API or KV write | Full repartition with checkpointing + retry |
 | **Buffering** | Publish to buffer subject when KV says so | Idempotent replay, purge after |
 | **Ordering** | Use consistent partition hash | Maintains partition→consumer mapping |
 | **HA** | Nothing | Leader election, failover, repartition resume |
 
-## Repartition Protocol
+## Repartition Protocol (v2 — ordered replay)
 
-When the partition count changes, the leader's reconciler orchestrates a 7-step protocol with step-level checkpointing:
+When the partition count changes, the leader's reconciler orchestrates a protocol with step-level checkpointing. The critical guarantee: **all buffered messages are replayed to partition subjects BEFORE any new direct messages arrive**, ensuring strict per-key ordering.
 
 1. **Set KV mode to "buffer"** — all producers auto-switch via KV watch (retried 3x)
 2. **Wait for in-flight messages** — brief pause for direct-published messages to land
 3. **Drain consumers** — wait for all partition consumers to finish pending work
 4. **Update KV partition count** — write new count to NATS KV store
-5. **Scale consumers** — backend starts/stops consumer instances (retried 3x)
-6. **Set KV mode to "direct"** — all producers auto-switch back (retried 3x)
-7. **Replay buffer** — read all messages from buffer stream, re-route to partition stream with new mapping (idempotent MsgIDs), then purge. Failed replays go to DLQ.
+5. **Restart consumers** — stop all consumers, start fresh at new count (clears per-key tracking state)
+6. **Replay buffer** — fetch-based ordered replay of all buffered messages to new partition subjects (idempotent MsgIDs). When nearly caught up, switch to direct mode and drain remaining buffer before producers see the mode change.
+7. **Purge buffer** — remove replayed messages from buffer stream
+
+Steps 6-7 are integrated: the direct mode switch happens *inside* the replay loop when the buffer is nearly empty. This eliminates the race condition where new direct messages could arrive before replay completes. Failed replays go to DLQ.
 
 Each step is checkpointed to KV. If the leader crashes mid-repartition, the new leader resumes from the last completed step — no work is lost or repeated.
 
@@ -623,29 +626,58 @@ Messages queue durably in the buffer stream during repartition — no in-memory 
 
 The controlplane serves a real-time web UI at **http://localhost:9090** with:
 
-- **Scale controls** — click to set partition count (1-10), triggers full repartition protocol
+- **Multi-stream tabs** — switch between registered streams; each stream has independent stats and controls
+- **Register stream form** — click "+ Register Stream" to add new streams at runtime (name + partition count)
+- **Per-stream scale controls** — click to set partition count (1-10) for the selected stream
 - **Publish rate control** — adjust producer rate (stop, 1-500 msg/s, custom)
 - **Producer mode indicator** — shows Direct (green) or Buffering (amber) during repartition
-- **Stream stats** — message counts for partition and buffer streams with progress bars
-- **Consumer cards** — delivered, pending, ack-pending per partition consumer
+- **Stream stats** — message counts for partition and buffer streams with progress bars (per selected stream)
+- **Consumer cards** — delivered, pending, ack-pending per partition consumer (scoped to selected stream)
 - **Per-account sequence tracking** — published vs consumed sequences with mismatch flagging
-- **Architecture diagram** — live visualization with dynamic stream names
+- **Architecture diagram** — live visualization with dynamic stream names for the selected stream
 
 All stats update via Server-Sent Events (SSE) every 500ms.
+
+**Multi-stream note:** Each stream tab shows data independently for that stream's NATS infrastructure. If a stream shows 0 messages and an empty progress bar, it means **no producer is publishing to that stream**. Each producer instance targets a single stream (configured via the `STREAM_NAME` env var). To see message activity on multiple stream tabs, run a separate producer per stream:
+
+```bash
+# Producer for ORDERS stream
+docker run -e STREAM_NAME=ORDERS -e NATS_URL=nats://nats:4222 ... nats_poc-producer
+
+# Producer for PAYMENTS stream
+docker run -e STREAM_NAME=PAYMENTS -e NATS_URL=nats://nats:4222 ... nats_poc-producer
+```
+
+Registering a stream via the UI or API only creates the NATS infrastructure (stream, buffer, KV, consumers) — it does not automatically start publishing to it.
 
 ## API Reference
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/register?stream=NAME&partitions=N` | POST | Register a new stream (creates streams, KV, DLQ, consumers) |
-| `/scale?partitions=N` | POST | Scale partition count (writes desired, reconciler acts) |
-| `/scale?stream=NAME&partitions=N` | POST | Scale a specific stream |
+| `/scale?stream=NAME&partitions=N` | POST | Scale a specific stream's partition count. `stream` is required when multiple streams are registered; if omitted, defaults to the first registered stream. |
 | `/rate?rate=N` | POST | Change producer publish rate (0-1000 msg/s) |
-| `/status` | GET | Current system status (JSON) |
-| `/events` | GET | SSE stream of real-time status updates |
+| `/status` | GET | Current system status (JSON). Includes `stream_data` map with per-stream status and `registered` array of stream names. |
+| `/events` | GET | SSE stream of real-time status updates (same payload as `/status`) |
 | `/health` | GET | Component health (NATS, JetStream, leader). Returns 503 if unhealthy. |
 | `/ready` | GET | Readiness probe (connected + stream registered). Returns 503 if not ready. |
 | `/leader` | GET | Leader election status (instance_id, is_leader, leader_id) |
+
+### Multi-stream support
+
+The controlplane supports multiple independent streams, each with its own partition count, consumers, reconciler, and auto-scaler. Streams can be registered at startup via `STREAM_NAME` env var or at runtime via `POST /register`:
+
+```bash
+# Register multiple streams
+curl -X POST 'http://localhost:9090/register?stream=ORDERS&partitions=3'
+curl -X POST 'http://localhost:9090/register?stream=PAYMENTS&partitions=2'
+curl -X POST 'http://localhost:9090/register?stream=EVENTS&partitions=5'
+
+# Scale a specific stream
+curl -X POST 'http://localhost:9090/scale?stream=PAYMENTS&partitions=4'
+```
+
+Each stream gets fully independent NATS infrastructure (partition stream, buffer stream, DLQ, KV bucket) and its own set of consumer containers. The dashboard UI provides stream tabs to switch between streams.
 
 ## Project Layout
 
@@ -655,10 +687,10 @@ cmd/
   consumer/            Microservice: partition consumer (reads PARTITION_ID env)
   controlplane/        Microservice: scaling coordinator + web UI + /register API
     static/              Embedded HTML dashboard
-    backend.go           ConsumerRuntime interface (pluggable backend)
-    backend_k8s.go       Kubernetes backend (StatefulSet scaling via REST API)
-    containers.go        Docker backend (container management)
-    service.go           Service layer (Register, Scale, Reconciler lifecycle)
+    backend.go           ConsumerRuntime interface (pluggable backend, per-stream partitions)
+    backend_k8s.go       Kubernetes backend (per-stream StatefulSet scaling via REST API)
+    containers.go        Docker backend (per-stream container management)
+    service.go           Service layer (multi-stream Register, Scale, Reconciler lifecycle)
   dashboard/           Standalone dashboard (in-process mode, for testing)
   diag/                Diagnostic tool
 autoscale/             Core library
@@ -668,7 +700,7 @@ autoscale/             Core library
   publisher.go           DirectPublisher (KV watch, circuit breaker, auto-reconnect)
   consumer.go            Consumer pool (dynamic partition consumers, DLQ integration)
   controlplane.go        In-process control plane (for tests)
-  scaler.go              Scaler (7-step repartition protocol with retry)
+  scaler.go              Scaler (v2 ordered repartition protocol with replay-before-direct)
   leader.go              NATS-native leader election (KV + TTL + CAS)
   reconciler.go          Desired-state reconciler (watches KV, triggers repartition)
   autoscaler.go          Lag-based auto-scaler (optional, writes desired_partitions to KV)
@@ -723,15 +755,20 @@ Open **http://localhost:9090** in your browser. You'll see messages flowing thro
 Use the UI buttons or the API:
 
 ```bash
-# Scale to 3 partitions
-curl -X POST 'http://localhost:9090/scale?partitions=3'
+# Scale to 3 partitions (specify stream when multiple are registered)
+curl -X POST 'http://localhost:9090/scale?stream=MY_ORDERS&partitions=3'
+
+# Register an additional stream
+curl -X POST 'http://localhost:9090/register?stream=PAYMENTS&partitions=2'
 
 # Change publish rate to 100 msg/s
 curl -X POST 'http://localhost:9090/rate?rate=100'
 
-# Get current status
+# Get current status (includes per-stream data under "stream_data")
 curl http://localhost:9090/status
 ```
+
+The dashboard shows stream tabs — click between registered streams to view their independent stats and controls.
 
 ### 4. Shut down
 

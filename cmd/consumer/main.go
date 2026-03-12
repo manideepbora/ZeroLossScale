@@ -110,7 +110,8 @@ func main() {
 	var totalMissing atomic.Int64
 	var mu sync.Mutex
 	lastSeqByKey := make(map[string]int)
-	gapsByKey := make(map[string][2]int) // key -> [gap_events, total_missing]
+	gapsByKey := make(map[string][2]int)     // key -> [gap_events, total_missing]
+	violationsByKey := make(map[string]int64) // key -> violation count
 
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		received.Add(1)
@@ -126,6 +127,7 @@ func main() {
 		if last, ok := lastSeqByKey[m.Key]; ok {
 			if m.Sequence <= last {
 				violations.Add(1)
+				violationsByKey[m.Key]++
 				log.Printf("[consumer] VIOLATION partition=%d key=%s seq=%d after=%d", partitionID, m.Key, m.Sequence, last)
 			} else if m.Sequence > last+1 {
 				gap := m.Sequence - last - 1
@@ -173,6 +175,9 @@ func main() {
 						entry["gaps"] = g[0]
 						entry["gap_total"] = g[1]
 					}
+					if v, ok := violationsByKey[k]; ok && v > 0 {
+						entry["violations"] = v
+					}
 					data, _ := json.Marshal(entry)
 					seqKV.Put(ctx, fmt.Sprintf("cons.p%d.%s", partitionID, k), data)
 				}
@@ -182,14 +187,19 @@ func main() {
 	}()
 
 	// Health endpoint.
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"partition":%d,"received":%d,"violations":%d,"gaps":%d,"missing":%d,"stream":"%s","status":"ok"}`,
 			partitionID, received.Load(), violations.Load(), gaps.Load(), totalMissing.Load(), streamName)
 	})
+	healthServer := &http.Server{
+		Addr:    ":" + healthPort,
+		Handler: healthMux,
+	}
 	go func() {
 		log.Printf("[consumer] health endpoint on :%s/health", healthPort)
-		if err := http.ListenAndServe(":"+healthPort, nil); err != nil {
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[consumer] health server: %v", err)
 		}
 	}()
@@ -197,11 +207,17 @@ func main() {
 	<-ctx.Done()
 	log.Printf("[consumer] shutting down. partition=%d received=%d violations=%d gaps=%d missing=%d",
 		partitionID, received.Load(), violations.Load(), gaps.Load(), totalMissing.Load())
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[consumer] health server shutdown: %v", err)
+	}
+
 	cc.Drain()
 
 	// Delete the durable consumer on shutdown so the control plane can recreate cleanly.
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
 	if err := js.DeleteConsumer(shutdownCtx, streamName, consumerName); err != nil {
 		log.Printf("[consumer] cleanup consumer %s: %v", consumerName, err)
 	} else {

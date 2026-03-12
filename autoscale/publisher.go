@@ -88,6 +88,9 @@ func (p *DirectPublisher) watchKV(ctx context.Context) {
 			continue
 		}
 
+		// WatchAll replays all current values as initial entries before
+		// streaming live updates, so there is no gap between reading
+		// initial state and receiving subsequent changes.
 		watcher, err := kv.WatchAll(ctx)
 		if err != nil {
 			log.Printf("[publisher] WARNING: cannot start KV watch: %v (retrying in %v)", err, backoff)
@@ -100,8 +103,6 @@ func (p *DirectPublisher) watchKV(ctx context.Context) {
 			backoff = min(backoff*2, 30*time.Second)
 			continue
 		}
-
-		p.resyncFromKV(ctx, kv)
 
 		p.watchHealthy.Store(true)
 		backoff = 1 * time.Second
@@ -149,22 +150,6 @@ func (p *DirectPublisher) watchKV(ctx context.Context) {
 	}
 }
 
-// resyncFromKV reads current mode and partition count directly from KV
-// to ensure we have the latest state after a reconnection.
-func (p *DirectPublisher) resyncFromKV(ctx context.Context, kv jetstream.KeyValue) {
-	if entry, err := kv.Get(ctx, KVKeyMode); err == nil {
-		p.mu.Lock()
-		p.buffering = (string(entry.Value()) == KVModeBuffer)
-		p.mu.Unlock()
-	}
-	if entry, err := kv.Get(ctx, KVKeyPartitionCount); err == nil {
-		if count, err := strconv.Atoi(string(entry.Value())); err == nil {
-			p.mu.Lock()
-			p.partitionCount = count
-			p.mu.Unlock()
-		}
-	}
-}
 
 // Publish sends a message to the appropriate subject based on current mode.
 // In direct mode: publishes to the partition subject (e.g. "MY_ORDERS.02").

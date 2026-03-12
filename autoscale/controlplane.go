@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -17,6 +18,7 @@ import (
 //   - PartitionManager: manages partition count and mode in KV
 type ControlPlane struct {
 	JS        jetstream.JetStream
+	NC        *nats.Conn // underlying connection, used for dedicated replay connections
 	PM        *PartitionManager
 	Publisher *DirectPublisher
 	Pool      *ConsumerPool
@@ -35,16 +37,15 @@ type PoolBackend struct {
 }
 
 func (b *PoolBackend) ScaleConsumers(ctx context.Context, oldCount, newCount int) error {
-	b.Pool.ScaleTo(ctx, newCount)
-	return nil
+	return b.Pool.ScaleTo(ctx, newCount)
 }
 
 // NewControlPlane creates the full system with default config.
-func NewControlPlane(ctx context.Context, js jetstream.JetStream) (*ControlPlane, error) {
-	return NewControlPlaneWithConfig(ctx, js, DefaultConfig())
+func NewControlPlane(ctx context.Context, js jetstream.JetStream, nc *nats.Conn) (*ControlPlane, error) {
+	return NewControlPlaneWithConfig(ctx, js, nc, DefaultConfig())
 }
 
-func NewControlPlaneWithConfig(ctx context.Context, js jetstream.JetStream, cfg Config) (*ControlPlane, error) {
+func NewControlPlaneWithConfig(ctx context.Context, js jetstream.JetStream, nc *nats.Conn, cfg Config) (*ControlPlane, error) {
 	if err := cfg.EnsureStreams(ctx, js); err != nil {
 		return nil, err
 	}
@@ -68,6 +69,7 @@ func NewControlPlaneWithConfig(ctx context.Context, js jetstream.JetStream, cfg 
 
 	scaler := &Scaler{
 		JS:      js,
+		NC:      nc,
 		PM:      pm,
 		Cfg:     cfg,
 		Backend: &PoolBackend{Pool: pool},
@@ -76,6 +78,7 @@ func NewControlPlaneWithConfig(ctx context.Context, js jetstream.JetStream, cfg 
 
 	return &ControlPlane{
 		JS:        js,
+		NC:        nc,
 		PM:        pm,
 		Publisher: pub,
 		Pool:      pool,
@@ -88,8 +91,7 @@ func NewControlPlaneWithConfig(ctx context.Context, js jetstream.JetStream, cfg 
 
 // Start initializes the consumer pool.
 func (cp *ControlPlane) Start(ctx context.Context) error {
-	cp.Pool.ScaleTo(ctx, cp.PM.Count())
-	return nil
+	return cp.Pool.ScaleTo(ctx, cp.PM.Count())
 }
 
 // Repartition changes the partition count. Delegates to the Scaler which

@@ -652,7 +652,7 @@ func BenchmarkPublish(b *testing.B) {
 	_ = js.DeleteKeyValue(ctx, cfg.KVBucket)
 	cfg.StreamConfig.Duplicates = 100 * time.Millisecond
 
-	cp, err := autoscale.NewControlPlaneWithConfig(ctx, js, cfg)
+	cp, err := autoscale.NewControlPlaneWithConfig(ctx, js, nc, cfg)
 	if err != nil {
 		b.Fatalf("control plane: %v", err)
 	}

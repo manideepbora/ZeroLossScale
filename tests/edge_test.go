@@ -239,7 +239,7 @@ func TestPublish_BeforeInit(t *testing.T) {
 // =========================================================================
 // EDGE 9: Buffer replay with empty buffer
 // =========================================================================
-func TestReplayBuffer_Empty(t *testing.T) {
+func TestReplayContinuous_Empty(t *testing.T) {
 	nc, js := connectJS(t)
 	defer nc.Close()
 	ctx := context.Background()
@@ -248,20 +248,20 @@ func TestReplayBuffer_Empty(t *testing.T) {
 	defer cp.DestroyAll(ctx)
 
 	// Replay with nothing in the buffer.
-	replayed, err := cp.Scaler.ReplayBuffer(ctx, 1)
+	replayed, err := cp.Scaler.ReplayContinuous(ctx, 1)
 	if err != nil {
 		t.Fatalf("replay empty buffer: %v", err)
 	}
 	if replayed != 0 {
 		t.Errorf("expected 0 replayed from empty buffer, got %d", replayed)
 	}
-	t.Log("PASS: ReplayBuffer with empty buffer returns 0")
+	t.Log("PASS: ReplayContinuous with empty buffer returns 0")
 }
 
 // =========================================================================
 // EDGE 10: Buffer replay republishes correctly
 // =========================================================================
-func TestReplayBuffer_WithMessages(t *testing.T) {
+func TestReplayContinuous_WithMessages(t *testing.T) {
 	nc, js := connectJS(t)
 	defer nc.Close()
 	ctx := context.Background()
@@ -285,7 +285,7 @@ func TestReplayBuffer_WithMessages(t *testing.T) {
 	}
 
 	// Replay to 1 partition.
-	replayed, err := cp.Scaler.ReplayBuffer(ctx, 1)
+	replayed, err := cp.Scaler.ReplayContinuous(ctx, 1)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestReplayBuffer_WithMessages(t *testing.T) {
 	if !waitForConsumers(cp.Pool, 5, 10*time.Second) {
 		t.Fatalf("timeout: expected 5 consumed, got %d", cp.Pool.TotalReceived())
 	}
-	t.Logf("PASS: ReplayBuffer replayed %d messages correctly", replayed)
+	t.Logf("PASS: ReplayContinuous replayed %d messages correctly", replayed)
 }
 
 // =========================================================================

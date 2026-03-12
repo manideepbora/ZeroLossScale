@@ -48,14 +48,16 @@ func (pm *PartitionManager) Count() int {
 	return pm.count
 }
 
-// SetCount updates the partition count in KV.
+// SetCount updates the partition count in KV and local state atomically.
+// The lock is held for the entire operation to prevent concurrent callers
+// from interleaving KV writes with local state updates.
 func (pm *PartitionManager) SetCount(ctx context.Context, n int) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 	if _, err := pm.kv.Put(ctx, KVKeyPartitionCount, []byte(strconv.Itoa(n))); err != nil {
 		return err
 	}
-	pm.mu.Lock()
 	pm.count = n
-	pm.mu.Unlock()
 	return nil
 }
 
@@ -66,14 +68,16 @@ func (pm *PartitionManager) Mode() string {
 	return pm.mode
 }
 
-// SetMode updates the mode in KV. Producers watching the KV will react.
+// SetMode updates the mode in KV and local state atomically.
+// The lock is held for the entire operation to prevent concurrent callers
+// from interleaving KV writes with local state updates.
 func (pm *PartitionManager) SetMode(ctx context.Context, mode string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
 	if _, err := pm.kv.Put(ctx, KVKeyMode, []byte(mode)); err != nil {
 		return err
 	}
-	pm.mu.Lock()
 	pm.mode = mode
-	pm.mu.Unlock()
 	return nil
 }
 

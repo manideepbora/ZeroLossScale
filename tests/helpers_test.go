@@ -38,7 +38,14 @@ func setupControlPlane(t *testing.T, ctx context.Context, js jetstream.JetStream
 
 	cfg.StreamConfig.Duplicates = 100 * time.Millisecond
 
-	cp, err := autoscale.NewControlPlaneWithConfig(ctx, js, cfg)
+	// Create a dedicated nats.Conn for the control plane (used for replay).
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("connect for control plane: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+
+	cp, err := autoscale.NewControlPlaneWithConfig(ctx, js, nc, cfg)
 	if err != nil {
 		t.Fatalf("new control plane: %v", err)
 	}

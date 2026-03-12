@@ -60,7 +60,8 @@ func ConsumerName(partition int) string {
 }
 
 // ScaleTo adjusts the consumer pool to exactly `count` consumers.
-func (cp *ConsumerPool) ScaleTo(ctx context.Context, count int) {
+// Returns an error if any partition consumer fails to start.
+func (cp *ConsumerPool) ScaleTo(ctx context.Context, count int) error {
 	cp.mu.Lock()
 
 	// Collect partitions to start and stop.
@@ -110,6 +111,7 @@ func (cp *ConsumerPool) ScaleTo(ctx context.Context, count int) {
 	cp.mu.Unlock()
 
 	// Start consumers AFTER releasing the lock so callbacks can acquire it.
+	var startErrors []error
 	for _, p := range pendings {
 		cc, err := cp.startConsumer(ctx, p.partition, p.result)
 		if err != nil {
@@ -118,6 +120,7 @@ func (cp *ConsumerPool) ScaleTo(ctx context.Context, count int) {
 			cp.mu.Lock()
 			delete(cp.consumers, p.partition)
 			cp.mu.Unlock()
+			startErrors = append(startErrors, fmt.Errorf("partition %d: %w", p.partition, err))
 			continue
 		}
 		cp.wg.Add(1)
@@ -128,6 +131,11 @@ func (cp *ConsumerPool) ScaleTo(ctx context.Context, count int) {
 		}(p.cctx, cc)
 		log.Printf("[consumer-pool] started consumer for partition %d", p.partition)
 	}
+
+	if len(startErrors) > 0 {
+		return fmt.Errorf("failed to start %d/%d consumers: %v", len(startErrors), len(pendings), startErrors[0])
+	}
+	return nil
 }
 
 // startConsumer creates a JetStream durable consumer and begins consuming.

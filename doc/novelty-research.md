@@ -14,9 +14,9 @@ This project implements a **buffer-drain-replay** protocol for dynamically repar
 2. **Buffer stream** — During repartition, messages are written to a temporary buffer stream instead of partition subjects.
 3. **Consumer drain** — Existing consumers are drained to zero pending before partition reassignment.
 4. **Partition count update** — The KV `partition_count` key is updated atomically.
-5. **Consumer scaling** — Backend (Docker/K8s) scales consumer instances to match the new partition count.
-6. **Mode restore** — Producers are signaled back to `direct` mode.
-7. **Buffer replay** — Buffered messages are replayed to the correct new partition subjects with idempotent message IDs.
+5. **Consumer restart** — All consumers are stopped and restarted fresh at the new partition count (clears per-key ordering state).
+6. **Ordered buffer replay** — Buffered messages are replayed to the correct new partition subjects using fetch-based ordered consumption and idempotent message IDs. The direct mode switch is integrated into the replay loop — when the buffer is nearly empty, the mode switches to direct and the remaining buffer is drained before producers see the change. This guarantees all buffered messages arrive at consumers before any new direct messages.
+7. **Buffer purge** — Replayed messages are removed from the buffer stream.
 8. **Crash-resumable checkpointing** — Each step is checkpointed to KV, allowing the protocol to resume from the last completed step after a crash.
 
 ---
@@ -156,7 +156,7 @@ What is novel is the **specific combination** of these elements into a single, c
 
 1. **KV-based mode signaling for language-agnostic producer coordination** — No other system uses a KV watch to switch producers between direct and buffer modes. This decouples the repartition coordinator from producers entirely (no RPC, no client library requirement, no sidecar).
 
-2. **Buffer-drain-replay as a complete repartitioning protocol** — While individual steps have precedent, no system combines buffer → drain → update → scale → restore → replay as a defined protocol for changing partition count.
+2. **Buffer-drain-replay as a complete repartitioning protocol** — While individual steps have precedent, no system combines buffer → drain → update → restart → replay → restore as a defined protocol for changing partition count, with the critical ordering guarantee that replay completes before direct mode resumes.
 
 3. **Bidirectional scaling with the same protocol** — The protocol handles both scale-up and scale-down identically. Kafka cannot scale down. Kinesis uses different APIs for split vs. merge. This protocol is direction-agnostic.
 

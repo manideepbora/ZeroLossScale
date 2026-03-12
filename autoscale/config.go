@@ -38,6 +38,17 @@ type Config struct {
 
 	// Drain / repartition.
 	DrainTimeout time.Duration
+
+	// Replay tuning.
+	InFlightWait      time.Duration // wait for in-flight publishes after buffer mode (step 2)
+	ReplayBatchSize   int           // number of messages per replay fetch
+	ReplayFetchWait   time.Duration // max wait per replay fetch call
+	ReplayPollInterval time.Duration // how often to poll consumer info during replay
+	ReplaySwitchThreshold uint64    // NumPending below which we switch to direct mode
+	StragglerWait     time.Duration // wait for straggler messages after direct mode switch
+
+	// Stream replication.
+	Replicas int // number of stream replicas (set >= 3 for production HA)
 }
 
 // NewConfig creates a Config where all names are derived from the given stream name.
@@ -60,9 +71,9 @@ func NewConfig(streamName string) Config {
 			Retention:  jetstream.LimitsPolicy,
 			MaxMsgs:    1_000_000,
 			MaxAge:     24 * time.Hour,
-			Replicas:   1,
 			Discard:    jetstream.DiscardOld,
 			Duplicates: 2 * time.Minute,
+			// Replicas is set from Config.Replicas in EnsureStreams.
 		},
 
 		BufferStreamName: name + "_BUFFER",
@@ -79,6 +90,15 @@ func NewConfig(streamName string) Config {
 		MaxAckPending: 1000,
 
 		DrainTimeout: 30 * time.Second,
+
+		InFlightWait:          500 * time.Millisecond,
+		ReplayBatchSize:       256,
+		ReplayFetchWait:       5 * time.Millisecond,
+		ReplayPollInterval:    50 * time.Millisecond,
+		ReplaySwitchThreshold: 10,
+		StragglerWait:         50 * time.Millisecond,
+
+		Replicas: 1,
 	}
 }
 
@@ -99,8 +119,14 @@ const (
 // EnsureStreams creates or updates both the partition and buffer streams.
 // Safe to call from multiple services — uses CreateOrUpdate semantics.
 func (c Config) EnsureStreams(ctx context.Context, js jetstream.JetStream) error {
+	replicas := c.Replicas
+	if replicas < 1 {
+		replicas = 1
+	}
+
 	streamCfg := c.StreamConfig
 	streamCfg.Name = c.StreamName
+	streamCfg.Replicas = replicas
 	if len(streamCfg.Subjects) == 0 {
 		streamCfg.Subjects = []string{c.SubjectPrefix + ".>"}
 	}
@@ -115,7 +141,7 @@ func (c Config) EnsureStreams(ctx context.Context, js jetstream.JetStream) error
 		Retention:  jetstream.LimitsPolicy,
 		MaxMsgs:    1_000_000,
 		MaxAge:     24 * time.Hour,
-		Replicas:   1,
+		Replicas:   replicas,
 		Discard:    jetstream.DiscardOld,
 		Duplicates: 2 * time.Minute,
 	}
